@@ -15,6 +15,34 @@ jobs:
           [ -d IDeviceKitten ] || git clone --depth 1 https://github.com/khcrysalis/IDeviceKit IDeviceKitten
           rm -rf Zsign/.git IDeviceKitten/.git
 
+      - name: Use local IDevice framework (avoid SwiftPM binary download bug)
+        run: |
+          # The old working project used a LOCAL IDevice.xcframework (no download).
+          # The cloned IDeviceKit downloads it from GitHub and SwiftPM fails with
+          # "artifact ... already exists in file system". Download it ourselves with curl
+          # and point Package.swift to the local copy.
+          python3 - <<'PY'
+          import re, subprocess, os
+          pkg = "IDeviceKitten/Package.swift"
+          src = open(pkg, encoding="utf-8").read()
+          pat = re.compile(r'\.binaryTarget\(\s*name:\s*"([^"]+)"\s*,\s*url:\s*"([^"]+)"\s*,\s*checksum:\s*"[^"]+"\s*\)', re.S)
+          os.makedirs("IDeviceKitten/Frameworks", exist_ok=True)
+          def fix(m):
+              name, url = m.group(1), m.group(2)
+              print("Downloading", name, "from", url)
+              zp = "/tmp/" + name + ".zip"
+              subprocess.check_call(["curl", "-fSL", "--retry", "3", "-o", zp, url])
+              subprocess.check_call(["unzip", "-q", "-o", zp, "-d", "IDeviceKitten/Frameworks"])
+              return '.binaryTarget(name: "%s", path: "Frameworks/%s.xcframework")' % (name, name)
+          new, n = pat.subn(fix, src)
+          open(pkg, "w", encoding="utf-8").write(new)
+          print("Patched binary targets:", n)
+          PY
+          echo "---- Package.swift ----"
+          cat IDeviceKitten/Package.swift
+          echo "---- Frameworks ----"
+          ls -la IDeviceKitten/Frameworks
+
       - name: Select Xcode 26.2 (same as the old working project)
         run: |
           ls /Applications | grep -i "^Xcode" || true
