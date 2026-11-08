@@ -1351,6 +1351,10 @@ final class AutoSignPipelineManager: ObservableObject {
 	/// Name + icon shown in the top download banner, keyed like `activeStates`.
 	@Published var bannerInfo: [String: DownloadBannerInfo] = [:]
 	private var userCancelledKeys: Set<String> = []
+	// Pause / resume (App Store style)
+	private var pausingKeys: Set<String> = []
+	private var pausedApps: [String: ASRepository.App] = [:]
+	private var resumeDataByKey: [String: Data] = [:]
     private var packagePipeline = XSignBoundedPipeline<ASRepository.App, URL>()
     private var pendingInstallApps: [AnyApp] = []
     private var activeNetworkTask: URLSessionDownloadTask?
@@ -1362,6 +1366,7 @@ final class AutoSignPipelineManager: ObservableObject {
         case failed(String)
         case preparing
 		case downloading
+		case paused
 		case signing
 		case ready
 	}
@@ -1425,8 +1430,19 @@ final class AutoSignPipelineManager: ObservableObject {
         if let state = activeStates[key] {
             switch state {
             case .failed: activeStates.removeValue(forKey: key)
+            case .paused:
+                resumeDownload(key: key)
+                return
             default: return
             }
+        }
+        // Ready-to-install link in the JSON (itms-services:// or a manifest .plist):
+        // let iOS install it directly - no download, no signing, nothing kept in the Library.
+        if let rawURL = app.currentDownloadUrl ?? app.versions?.first?.downloadURL,
+           let direct = Self.directInstallURL(from: rawURL) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            UIApplication.shared.open(direct)
+            return
         }
         guard let url = app.currentDownloadUrl ?? app.versions?.first?.downloadURL,
               ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
@@ -1440,12 +1456,71 @@ final class AutoSignPipelineManager: ObservableObject {
         startNextDownload()
     }
 
+    /// Returns an itms-services install URL when the JSON link is already installable.
+    nonisolated static func directInstallURL(from url: URL) -> URL? {
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "itms-services" { return url }
+        if scheme == "https", url.pathExtension.lowercased() == "plist" {
+            var allowed = CharacterSet.alphanumerics
+            allowed.insert(charactersIn: "-._~")
+            guard let encoded = url.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+            return URL(string: "itms-services://?action=download-manifest&url=\(encoded)")
+        }
+        return nil
+    }
+
     /// Stop button of the top download banner.
     func cancelActiveDownload(key: String) {
         guard activeStates[key] == .downloading, packagePipeline.activeDownload?.key == key else { return }
         userCancelledKeys.insert(key)
         activeNetworkTask?.cancel()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    /// Pause the running download (like the App Store). It can be resumed later.
+    func pauseActiveDownload(key: String) {
+        guard activeStates[key] == .downloading,
+              let entry = packagePipeline.activeDownload, entry.key == key,
+              let task = activeNetworkTask else { return }
+        pausingKeys.insert(key)
+        pausedApps[key] = entry.value
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        task.cancel(byProducingResumeData: { [weak self] data in
+            Task { @MainActor in
+                guard let self, let data, self.pausingKeys.contains(key) || self.activeStates[key] == .paused else { return }
+                self.resumeDataByKey[key] = data
+            }
+        })
+    }
+
+    /// Continue a paused download from where it stopped (or restart it if iOS gave no resume data).
+    func resumeDownload(key: String) {
+        guard activeStates[key] == .paused, let app = pausedApps[key] else { return }
+        if let reason = XSignRemoteManager.shared.blockingReason {
+            UIAlertController.showAlertWithOk(title: AshteL10n.t("تنبيه"), message: reason)
+            return
+        }
+        guard packagePipeline.enqueue(key: key, job: app) else { return }
+        activeStates[key] = .queued
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        startNextDownload()
+    }
+
+    /// Cancel a running or paused download and forget it.
+    func cancelDownload(key: String) {
+        switch activeStates[key] {
+        case .downloading:
+            cancelActiveDownload(key: key)
+        case .paused:
+            pausedApps.removeValue(forKey: key)
+            resumeDataByKey.removeValue(forKey: key)
+            downloadProgress.removeValue(forKey: key)
+            bannerInfo.removeValue(forKey: key)
+            activeStates.removeValue(forKey: key)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        default:
+            break
+        }
     }
 
     func applyRemotePolicy() {
@@ -1483,15 +1558,19 @@ final class AutoSignPipelineManager: ObservableObject {
             failNetworkDownload(key: key, message: AshteL10n.t("رابط التنزيل غير صالح."))
             return
         }
+        let resumeData = resumeDataByKey.removeValue(forKey: key)
+        pausedApps.removeValue(forKey: key)
         activeStates[key] = .downloading
-        downloadProgress[key] = 0
+        if resumeData == nil { downloadProgress[key] = 0 }
         var request = URLRequest(url: url)
         request.setValue("AshteMobile/2.0", forHTTPHeaderField: "User-Agent")
-        let task = turboSession.downloadTask(with: request) { [weak self] location, response, error in
+        let completion: @Sendable (URL?, URLResponse?, Error?) -> Void = { [weak self] location, response, error in
             guard let self else { return }
             guard error == nil, let location,
                   let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                let resume = (error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
                 Task { @MainActor in
+                    if let resume, self.pausingKeys.contains(key) { self.resumeDataByKey[key] = resume }
                     self.failNetworkDownload(key: key, message: error?.localizedDescription ?? AshteL10n.t("تعذّر تنزيل التطبيق من الخادم."))
                 }
                 return
@@ -1511,6 +1590,12 @@ final class AutoSignPipelineManager: ObservableObject {
                 return
             }
             Task { @MainActor in self.receivedPackage(file, key: key) }
+        }
+        let task: URLSessionDownloadTask
+        if let resumeData {
+            task = turboSession.downloadTask(withResumeData: resumeData, completionHandler: completion)
+        } else {
+            task = turboSession.downloadTask(with: request, completionHandler: completion)
         }
         let progressGate = XSignDownloadProgressGate()
         progressObservations[key] = task.progress.observe(\Progress.fractionCompleted, options: [.new]) { [weak self] progress, _ in
@@ -1583,12 +1668,19 @@ final class AutoSignPipelineManager: ObservableObject {
         guard packagePipeline.failDownload(key: key) else { return }
         activeNetworkTask = nil
         progressObservations.removeValue(forKey: key)
-        downloadProgress.removeValue(forKey: key)
-        if userCancelledKeys.remove(key) != nil {
-            activeStates.removeValue(forKey: key)
-            bannerInfo.removeValue(forKey: key)
+        if pausingKeys.remove(key) != nil {
+            // Paused by the user: keep progress, app and resume data so it can continue.
+            activeStates[key] = .paused
         } else {
-            activeStates[key] = .failed(message)
+            downloadProgress.removeValue(forKey: key)
+            pausedApps.removeValue(forKey: key)
+            resumeDataByKey.removeValue(forKey: key)
+            if userCancelledKeys.remove(key) != nil {
+                activeStates.removeValue(forKey: key)
+                bannerInfo.removeValue(forKey: key)
+            } else {
+                activeStates[key] = .failed(message)
+            }
         }
         startNextProcessing()
         startNextDownload()
@@ -1621,12 +1713,27 @@ final class AutoSignPipelineManager: ObservableObject {
                     self.finishDownload(key: appKey, error: AshteL10n.t("تعذّر العثور على التطبيق الموقّع."))
                     return
                 }
+                // The unsigned copy is not needed any more: keep nothing extra in the Library.
+                Storage.shared.deleteApp(for: importedApp)
                 self.activeStates[appKey] = .ready
                 self.enqueueInstallation(signed)
                 self.finishDownload(key: appKey, error: nil)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                     if self?.activeStates[appKey] == .ready { self?.activeStates[appKey] = nil }
                 }
+            }
+        }
+    }
+
+    /// Removes the signed copy of a store app after it was installed (or failed) so it never stays in the Library.
+    func cleanupAfterInstall(uuid: String) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let request = NSFetchRequest<Signed>(entityName: "Signed")
+            request.fetchLimit = 1
+            request.predicate = NSPredicate(format: "uuid == %@", uuid)
+            if let signed = (try? Storage.shared.context.fetch(request))?.first {
+                Storage.shared.deleteApp(for: signed)
             }
         }
     }
@@ -3292,7 +3399,11 @@ struct AppStore2026DownloadButton: View {
 	
 	var body: some View {
 		Button {
-			pipeline.downloadAndAutoSign(app: app)
+			switch currentStage {
+			case .downloading: pipeline.pauseActiveDownload(key: appKey)
+			case .paused: pipeline.resumeDownload(key: appKey)
+			default: pipeline.downloadAndAutoSign(app: app)
+			}
 		} label: {
 			switch currentStage {
             case .queued:
@@ -3315,18 +3426,26 @@ struct AppStore2026DownloadButton: View {
                         .frame(width: 100)
                 }
                 .accessibilityHint(message)
-			case .downloading:
-				HStack(spacing: 5) {
-					ProgressView()
-						.tint(AppStoreTheme.contrastingText(forHex: userTintHex))
-						.scaleEffect(0.72)
+			case .downloading, .paused:
+				HStack(spacing: 6) {
+					ZStack {
+						Circle()
+							.stroke(accentColor.opacity(0.25), lineWidth: 3)
+						Circle()
+							.trim(from: 0, to: max(0.03, CGFloat(progressPercent) / 100))
+							.stroke(accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+							.rotationEffect(.degrees(-90))
+						Image(systemName: currentStage == .paused ? "play.fill" : "pause.fill")
+							.font(.system(size: 11, weight: .bold))
+							.foregroundStyle(accentColor)
+					}
+					.frame(width: 30, height: 30)
 					Text("\(progressPercent)%")
 						.font(.system(size: 12, weight: .heavy, design: .rounded))
 						.monospacedDigit()
-						.foregroundStyle(AppStoreTheme.contrastingText(forHex: userTintHex))
+						.foregroundStyle(.secondary)
 				}
 				.frame(width: 82, height: 32)
-				.background(Capsule().fill(accentColor))
 				
 			case .preparing, .signing:
 				HStack(spacing: 4) {
@@ -3369,6 +3488,15 @@ struct AppStore2026DownloadButton: View {
 			}
 		}
 		.buttonStyle(.plain)
+		.contextMenu {
+			if currentStage == .downloading {
+				Button { pipeline.pauseActiveDownload(key: appKey) } label: { Label("Pause Download", systemImage: "pause.circle") }
+				Button(role: .destructive) { pipeline.cancelDownload(key: appKey) } label: { Label("Cancel Download", systemImage: "xmark.circle") }
+			} else if currentStage == .paused {
+				Button { pipeline.resumeDownload(key: appKey) } label: { Label("Resume Download", systemImage: "play.circle") }
+				Button(role: .destructive) { pipeline.cancelDownload(key: appKey) } label: { Label("Cancel Download", systemImage: "xmark.circle") }
+			}
+		}
 	}
 }
 

@@ -496,7 +496,7 @@ struct AshteMobileApp: App {
             .sheet(item: $autoSign.readyToInstallApp, onDismiss: {
                 autoSign.presentNextReadyApp()
             }) { signedApp in
-                InstallPreviewView(app: signedApp.base, isSharing: signedApp.archive)
+                InstallPreviewView(app: signedApp.base, isSharing: signedApp.archive, removeAfterInstall: true)
                     .presentationDetents([.height(470)])
                     .presentationDragIndicator(.visible)
             }

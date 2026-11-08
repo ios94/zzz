@@ -13,6 +13,7 @@ struct XSignDownloadBanner: View {
 
 	private var activeKey: String? {
 		pipeline.activeStates.first(where: { $0.value == .downloading })?.key
+			?? pipeline.activeStates.first(where: { $0.value == .paused })?.key
 	}
 
 	var body: some View {
@@ -22,7 +23,12 @@ struct XSignDownloadBanner: View {
 					name: pipeline.bannerInfo[key]?.name ?? AshteBranding.appName,
 					iconURL: pipeline.bannerInfo[key]?.iconURL,
 					percent: pipeline.downloadProgress[key] ?? 0,
-					stop: { pipeline.cancelActiveDownload(key: key) }
+					isPaused: pipeline.activeStates[key] == .paused,
+					toggle: {
+						if pipeline.activeStates[key] == .paused { pipeline.resumeDownload(key: key) }
+						else { pipeline.pauseActiveDownload(key: key) }
+					},
+					cancel: { pipeline.cancelDownload(key: key) }
 				)
 				.padding(.horizontal, 40)
 				.padding(.top, 2)
@@ -35,7 +41,7 @@ struct XSignDownloadBanner: View {
 		.environment(\.layoutDirection, .leftToRight)
 	}
 
-	private func banner(name: String, iconURL: URL?, percent: Int, stop: @escaping () -> Void) -> some View {
+	private func banner(name: String, iconURL: URL?, percent: Int, isPaused: Bool, toggle: @escaping () -> Void, cancel: @escaping () -> Void) -> some View {
 		HStack(spacing: 10) {
 			AppStoreIconView(url: iconURL, appName: name, size: 38)
 
@@ -44,7 +50,7 @@ struct XSignDownloadBanner: View {
 					.font(.system(size: 15, weight: .semibold))
 					.foregroundStyle(.primary)
 					.lineLimit(1)
-				Text(verbatim: "\(percent)%")
+				Text(verbatim: isPaused ? "Paused · \(percent)%" : "\(percent)%")
 					.font(.system(size: 13, weight: .regular))
 					.monospacedDigit()
 					.foregroundStyle(.primary.opacity(0.9))
@@ -53,7 +59,16 @@ struct XSignDownloadBanner: View {
 
 			Spacer(minLength: 8)
 
-			Button(action: stop) {
+			Button(action: cancel) {
+				Image(systemName: "xmark")
+					.font(.system(size: 12, weight: .bold))
+					.foregroundStyle(.secondary)
+					.frame(width: 28, height: 28)
+					.background(Color.primary.opacity(0.08), in: Circle())
+			}
+			.buttonStyle(.plain)
+
+			Button(action: toggle) {
 				ZStack {
 					Circle()
 						.stroke(Color.primary.opacity(0.18), lineWidth: 4)
@@ -62,9 +77,9 @@ struct XSignDownloadBanner: View {
 						.stroke(Color.primary, style: StrokeStyle(lineWidth: 4, lineCap: .round))
 						.rotationEffect(.degrees(-90))
 						.animation(.easeOut(duration: 0.25), value: percent)
-					RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-						.fill(Color.primary)
-						.frame(width: 14, height: 14)
+					Image(systemName: isPaused ? "play.fill" : "pause.fill")
+						.font(.system(size: 14, weight: .bold))
+						.foregroundStyle(Color.primary)
 				}
 				.frame(width: 38, height: 38)
 				.contentShape(Circle())

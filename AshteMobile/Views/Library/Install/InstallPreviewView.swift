@@ -28,10 +28,13 @@ struct InstallPreviewView: View {
 	@StateObject var installer: ServerInstaller
 	
 	@State var isSharing: Bool
+	/// Store apps (Get button): delete the signed copy from the Library after installation.
+	var removeAfterInstall: Bool = false
 	
-	init(app: AppInfoPresentable, isSharing: Bool = false) {
+	init(app: AppInfoPresentable, isSharing: Bool = false, removeAfterInstall: Bool = false) {
 		self.app = app
 		self.isSharing = isSharing
+		self.removeAfterInstall = removeAfterInstall
 		let viewModel = InstallerStatusViewModel(isIdevice: UserDefaults.standard.integer(forKey: "AshteMobile.installationMethod") == 1)
 		self._viewModel = StateObject(wrappedValue: viewModel)
 		self._installer = StateObject(wrappedValue: ServerInstaller(app: app, viewModel: viewModel))
@@ -110,6 +113,15 @@ struct InstallPreviewView: View {
             installRequestWatchdog = nil
             progressTask?.cancel()
 			progressTask = nil
+			
+			if removeAfterInstall, let uuid = app.uuid {
+				switch viewModel.status {
+				case .completed, .broken(_):
+					AutoSignPipelineManager.shared.cleanupAfterInstall(uuid: uuid)
+				default:
+					break
+				}
+			}
 			
 			#if !targetEnvironment(macCatalyst)
 			BackgroundAudioManager.shared.stop()
