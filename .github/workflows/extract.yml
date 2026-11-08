@@ -11,62 +11,67 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Unzip into the repository
         run: |
           set -euo pipefail
 
-          # 1. Find the zip in the repo root (install-fix.zip first, otherwise the newest .zip)
-          if [ -f install-fix.zip ]; then
-            ZIP="install-fix.zip"
-          else
-            ZIP="$(find . -maxdepth 1 -type f -name '*.zip' -printf '%T@ %f\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
-          fi
-          if [ -z "${ZIP:-}" ] || [ ! -f "$ZIP" ]; then
-            echo "::error::No .zip file found in the repository root. Upload install-fix.zip to the main page of the repo first, then run this workflow again."
+          echo "=== Zip files in the repo root ==="
+          ls -la ./*.zip 2>/dev/null || true
+
+          # 1. Pick the zip that was committed LAST (not just any zip)
+          ZIP=""
+          BEST=-1
+          for f in ./*.zip; do
+            [ -f "$f" ] || continue
+            t="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
+            [ -n "$t" ] || t=0
+            echo "  $f  (committed at $t)"
+            if [ "$t" -ge "$BEST" ]; then BEST="$t"; ZIP="$f"; fi
+          done
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::No .zip file found in the repository root. Upload install-fix.zip to the MAIN page of the repo (not inside a folder), then run this workflow again."
             exit 1
           fi
-          echo "Using zip: $ZIP"
+          echo "=== Using zip: $ZIP ==="
 
           # 2. Unzip
           rm -rf /tmp/x && mkdir -p /tmp/x
           unzip -q "$ZIP" -d /tmp/x
 
-          # 3. Find the folder that holds the files
-          #    (either /changed, or a single top-level folder, or the zip root itself)
+          # 3. Content root: /changed, or a single top-level folder, or the zip root
           SRC=/tmp/x
           if [ -d "$SRC/changed" ]; then
             SRC="$SRC/changed"
           elif [ "$(find "$SRC" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] && [ -d "$(find "$SRC" -mindepth 1 -maxdepth 1)" ]; then
             SRC="$(find "$SRC" -mindepth 1 -maxdepth 1)"
           fi
-          echo "Content root: $SRC"
+          echo "=== Content root: $SRC ==="
+          echo "=== Files inside the zip ==="
+          (cd "$SRC" && find . -type f | sort)
 
-          # 4. If the repo was already renamed to AshteMobile but the zip still uses
-          #    Feather, rename the folder and the names inside the files.
-          if [ -d AshteMobile ] && [ ! -d Feather ] && [ -d "$SRC/Feather" ]; then
-            mv "$SRC/Feather" "$SRC/AshteMobile"
-            if [ -f "$SRC/AshteMobile/FeatherApp.swift" ]; then
-              mv "$SRC/AshteMobile/FeatherApp.swift" "$SRC/AshteMobile/AshteMobileApp.swift"
-            fi
-            find "$SRC" -type f -name '*.swift' -print0 | xargs -0 -r perl -CSD -pi -e '
-              next if /github\.com\/[^\s"]*Feather/;
-              s/NSPersistentContainer\(name: "Feather"\)/NSPersistentContainer(name: "__KEEP_FEATHER__")/g;
-              s/Feather/AshteMobile/g;
-              s/__KEEP_FEATHER__/Feather/g;
-            '
-          fi
-
-          # 5. Copy into the repository and remove the zip.
-          #    .github is skipped on purpose: GitHub does not let the workflow token
-          #    change files under .github/workflows (push would be rejected).
+          # 4. Copy into the repo (.github is skipped: the token cannot change workflows)
           rsync -a --exclude='.git' --exclude='.github' "$SRC"/ ./
-          rm -f "$ZIP"
+
+          # 5. Remove every zip from the repo root
+          rm -f ./*.zip
 
       - name: Commit extracted files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Apply uploaded zip" || echo "nothing to commit"
+
+          echo "=== Changed files ==="
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "::error::Nothing changed. The zip has the same files that are already in the repo."
+            exit 1
+          fi
+
+          git commit -m "Apply uploaded zip"
           git push
