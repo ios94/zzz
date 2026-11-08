@@ -15,24 +15,42 @@ jobs:
           [ -d IDeviceKitten ] || git clone --depth 1 https://github.com/khcrysalis/IDeviceKit IDeviceKitten
           rm -rf Zsign/.git IDeviceKitten/.git
 
+      - name: Restore IDevice framework cache
+        id: idevice-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: idevice-cache
+          key: idevice-framework-v1
+
       - name: Use local IDevice framework (avoid SwiftPM binary download bug)
         run: |
           # The old working project used a LOCAL IDevice.xcframework (no download).
           # The cloned IDeviceKit downloads it from GitHub and SwiftPM fails with
           # "artifact ... already exists in file system". Download it ourselves with curl
-          # and point Package.swift to the local copy.
+          # (long retry, GitHub sometimes answers 504) and point Package.swift to the local copy.
+          mkdir -p idevice-cache
           python3 - <<'PY'
-          import re, subprocess, os
+          import re, subprocess, os, sys
           pkg = "IDeviceKitten/Package.swift"
           src = open(pkg, encoding="utf-8").read()
           pat = re.compile(r'\.binaryTarget\(\s*name:\s*"([^"]+)"\s*,\s*url:\s*"([^"]+)"\s*,\s*checksum:\s*"[^"]+"\s*\)', re.S)
           os.makedirs("IDeviceKitten/Frameworks", exist_ok=True)
           def fix(m):
               name, url = m.group(1), m.group(2)
-              print("Downloading", name, "from", url)
-              zp = "/tmp/" + name + ".zip"
-              subprocess.check_call(["curl", "-fSL", "--retry", "3", "-o", zp, url])
+              zp = "idevice-cache/" + name + ".zip"
+              if os.path.exists(zp) and os.path.getsize(zp) > 1000:
+                  print("Using cached", zp)
+              else:
+                  print("Downloading", name, "from", url)
+                  subprocess.check_call(["curl", "-fSL", "--retry", "12", "--retry-delay", "15",
+                                         "--retry-all-errors", "--connect-timeout", "30",
+                                         "-o", zp, url])
               subprocess.check_call(["unzip", "-q", "-o", zp, "-d", "IDeviceKitten/Frameworks"])
+              target = "IDeviceKitten/Frameworks/%s.xcframework" % name
+              if not os.path.isdir(target):
+                  print("ERROR: %s not found after unzip. Frameworks folder has:" % target)
+                  print(os.listdir("IDeviceKitten/Frameworks"))
+                  sys.exit(1)
               return '.binaryTarget(name: "%s", path: "Frameworks/%s.xcframework")' % (name, name)
           new, n = pat.subn(fix, src)
           open(pkg, "w", encoding="utf-8").write(new)
@@ -42,6 +60,13 @@ jobs:
           cat IDeviceKitten/Package.swift
           echo "---- Frameworks ----"
           ls -la IDeviceKitten/Frameworks
+
+      - name: Save IDevice framework cache
+        if: steps.idevice-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: idevice-cache
+          key: idevice-framework-v1
 
       - name: Select Xcode 26.2 (same as the old working project)
         run: |
