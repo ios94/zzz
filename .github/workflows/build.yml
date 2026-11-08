@@ -44,6 +44,9 @@ jobs:
         run: |
           # Xcode sometimes crashes while registering packages (Abort trap: 6); a retry fixes it.
           for i in 1 2 3; do
+            # SwiftPM can fail with "artifact ... already exists in file system" for the
+            # IDevice binary package. Clearing its artifact cache before every attempt fixes it.
+            rm -rf "$HOME/Library/Caches/org.swift.swiftpm/artifacts"
             make && exit 0
             echo "build attempt $i failed, retrying..."
             sleep 5
