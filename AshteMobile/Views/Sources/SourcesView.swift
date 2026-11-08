@@ -1569,9 +1569,15 @@ final class AutoSignPipelineManager: ObservableObject {
             guard error == nil, let location,
                   let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 let resume = (error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+                // Show the real HTTP status + host so the cause (403 / 404 / 504 ...) is visible.
+                var fallback = AshteL10n.t("تعذّر تنزيل التطبيق من الخادم.")
+                if let http = response as? HTTPURLResponse {
+                    fallback += " (HTTP \(http.statusCode) · \(http.url?.host ?? ""))"
+                }
+                let failureMessage = error?.localizedDescription ?? fallback
                 Task { @MainActor in
                     if let resume, self.pausingKeys.contains(key) { self.resumeDataByKey[key] = resume }
-                    self.failNetworkDownload(key: key, message: error?.localizedDescription ?? AshteL10n.t("تعذّر تنزيل التطبيق من الخادم."))
+                    self.failNetworkDownload(key: key, message: failureMessage)
                 }
                 return
             }
