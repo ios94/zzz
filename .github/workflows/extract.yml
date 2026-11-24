@@ -21,34 +21,46 @@ jobs:
           echo "=== Zip files in the repo root ==="
           ls -la ./*.zip 2>/dev/null || true
 
-          # 1. Pick the zip that was committed LAST (not just any zip)
+          # 1. Pick the zip that was committed LAST
           ZIP=""
           BEST=-1
           for f in ./*.zip; do
             [ -f "$f" ] || continue
-            t="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
+            t="$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)"
             [ -n "$t" ] || t=0
             echo "  $f  (committed at $t)"
             if [ "$t" -ge "$BEST" ]; then BEST="$t"; ZIP="$f"; fi
           done
 
           if [ -z "$ZIP" ]; then
-            echo "::error::No .zip file found in the repository root. Upload install-fix.zip to the MAIN page of the repo (not inside a folder), then run this workflow again."
+            echo "::error::No .zip file found in the repository root. Upload the zip to the MAIN page of the repo (not inside a folder), then run this workflow again."
             exit 1
           fi
           echo "=== Using zip: $ZIP ==="
 
-          # 2. Unzip
+          # 2. Unzip and remove macOS junk
           rm -rf /tmp/x && mkdir -p /tmp/x
           unzip -q "$ZIP" -d /tmp/x
+          rm -rf /tmp/x/__MACOSX
+          find /tmp/x -name '.DS_Store' -delete
 
           # 3. Content root: /changed, or a single top-level folder, or the zip root
           SRC=/tmp/x
           if [ -d "$SRC/changed" ]; then
             SRC="$SRC/changed"
-          elif [ "$(find "$SRC" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] && [ -d "$(find "$SRC" -mindepth 1 -maxdepth 1)" ]; then
-            SRC="$(find "$SRC" -mindepth 1 -maxdepth 1)"
+          else
+            COUNT="$(find "$SRC" -mindepth 1 -maxdepth 1 | wc -l)"
+            if [ "$COUNT" -eq 1 ] && [ -d "$(find "$SRC" -mindepth 1 -maxdepth 1)" ]; then
+              SRC="$(find "$SRC" -mindepth 1 -maxdepth 1)"
+            fi
           fi
+
+          FILES="$(find "$SRC" -type f | wc -l)"
+          if [ "$FILES" -eq 0 ]; then
+            echo "::error::The zip contains no files."
+            exit 1
+          fi
+
           echo "=== Content root: $SRC ==="
           echo "=== Files inside the zip ==="
           (cd "$SRC" && find . -type f | sort)
