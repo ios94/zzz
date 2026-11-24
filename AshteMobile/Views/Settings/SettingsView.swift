@@ -194,7 +194,9 @@ extension SettingsView {
 		AsyncImage(url: AshteBranding.logoURL) { image in
 			image.resizable().scaledToFill()
 		} placeholder: {
-			FRAppIconView(size: size)
+			Image("AshteLogo")
+				.resizable()
+				.scaledToFill()
 		}
 		.frame(width: size, height: size)
 		.clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))

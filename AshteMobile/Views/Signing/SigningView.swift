@@ -48,16 +48,10 @@ struct XSignLogoShape: Shape {
 
 struct XSignHeaderLogo: View {
 	var body: some View {
-		XSignLogoShape()
-			.fill(
-				LinearGradient(
-					colors: [.primary, .accentColor],
-					startPoint: .topLeading,
-					endPoint: .bottomTrailing
-				)
-			)
+		Image("AshteHeaderLogo")
+			.resizable()
+			.scaledToFit()
 			.frame(width: 36, height: 36)
-			.shadow(color: Color.accentColor.opacity(0.25), radius: 4, x: 0, y: 2)
 	}
 }
 
