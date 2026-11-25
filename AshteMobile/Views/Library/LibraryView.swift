@@ -309,6 +309,10 @@ struct LibraryView: View {
         return apps.filter { _selectedAppUUIDs.contains($0.uuid ?? "") }
     }
 
+    private func _importStatus(index: Int, total: Int, percent: Int) -> String {
+        AshteL10n.t("استيراد %ld من %ld…", index + 1, total) + " · \(percent)%"
+    }
+
     private func _instantImportAndAutoSign(urls: [URL]) {
         guard !urls.isEmpty, !_isImportingFiles else { return }
         _isImportingFiles = true
@@ -317,10 +321,16 @@ struct LibraryView: View {
             var failures: [String] = []
             defer { _isImportingFiles = false }
             for (index, url) in urls.enumerated() {
-                _oneClickStatusMessage = AshteL10n.t("استيراد %ld من %ld…", index + 1, urls.count)
+                _oneClickStatusMessage = _importStatus(index: index, total: urls.count, percent: 0)
                 let hasAccess = url.startAccessingSecurityScopedResource()
                 let result: Result<String, Error> = await withCheckedContinuation { continuation in
-                    FR.importPackageFile(url) { continuation.resume(returning: $0) }
+                    FR.importPackageFile(url, onProgress: { fraction in
+                        _oneClickStatusMessage = _importStatus(
+                            index: index,
+                            total: urls.count,
+                            percent: Int((fraction * 100).rounded())
+                        )
+                    }) { continuation.resume(returning: $0) }
                 }
                 if hasAccess { url.stopAccessingSecurityScopedResource() }
                 switch result {

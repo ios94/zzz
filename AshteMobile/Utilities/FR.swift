@@ -56,11 +56,13 @@ enum FR {
         download: Download? = nil,
         sourceProvenance: SourceAppProvenance? = nil,
         consumeTemporaryFile: Bool = false,
+        onProgress: ((Double) -> Void)? = nil,
         completion: @escaping @MainActor (Result<String, Error>) -> Void
     ) {
         Task.detached {
             await FRPackageWorkGate.shared.acquire()
             let handler = AppFileHandler(file: ipa, download: download, sourceProvenance: sourceProvenance, consumeTemporaryFile: consumeTemporaryFile)
+            handler.onProgress = onProgress
             do {
                 try await handler.copy()
                 try await handler.extract()
@@ -69,7 +71,10 @@ enum FR {
                 try? await handler.clean()
                 let uuid = handler.resultUUID
                 await FRPackageWorkGate.shared.release()
-                await MainActor.run { completion(.success(uuid)) }
+                await MainActor.run {
+                    onProgress?(1)
+                    completion(.success(uuid))
+                }
             } catch {
                 try? await handler.clean()
                 try? FileManager.default.removeItem(at: FileManager.default.unsigned(handler.resultUUID))

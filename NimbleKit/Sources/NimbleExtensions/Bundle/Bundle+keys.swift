@@ -10,7 +10,7 @@ import Foundation.NSBundle
 extension Bundle {
 	/// Get the name of the app
 	public var name: String {
-		return "AshteMobile"
+		return plistName
 	}
 	
 	/// Original bundle name from Info.plist
