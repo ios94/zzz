@@ -91,7 +91,7 @@ jobs:
           rsync -rlt --exclude='.git' --exclude='.github' "$SRC"/ ./
 
           # 5. Remove every zip from the repo
-          find . -path ./.git -prune -o -type f -iname '*.zip' -print -delete
+          find . -path ./.git -prune -o -type f -iname '*.zip' -print0 | xargs -0 -r rm -f --
 
       - name: Commit extracted files
         run: |
