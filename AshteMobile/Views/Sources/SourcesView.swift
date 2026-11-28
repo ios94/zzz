@@ -142,6 +142,11 @@ actor AppStoreLiveMetadataBridge {
 		}
 		
 		let diskFile = Self.diskCacheDir.appendingPathComponent("\(cacheKey).json")
+		// Stored Apple data expires after 3 days so old screenshots do not stay forever.
+		let modified = (try? diskFile.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+		if let modified, Date().timeIntervalSince(modified) > 3 * 24 * 3600 {
+			try? FileManager.default.removeItem(at: diskFile)
+		}
 		if let data = try? Data(contentsOf: diskFile),
 		   let decoded = try? JSONDecoder().decode(AppleStoreRichMetadata.self, from: data) {
 			storeMetadata(decoded, for: cacheKey)
@@ -165,16 +170,12 @@ actor AppStoreLiveMetadataBridge {
 				return nil
 			}
 			
-			if let found = await Self.queryiTunes(
-				urlString: "https://itunes.apple.com/lookup?bundleId=\(encodedID)&country=SA"
-			) {
+			// Both storefronts are asked at the same time (was one after the other); SA wins when both answer.
+			async let sa = Self.queryiTunes(urlString: "https://itunes.apple.com/lookup?bundleId=\(encodedID)&country=SA")
+			async let us = Self.queryiTunes(urlString: "https://itunes.apple.com/lookup?bundleId=\(encodedID)&country=US")
+			let (foundSA, foundUS) = await (sa, us)
+			if let found = foundSA ?? foundUS {
 				return found
-			}
-			
-			if let foundUS = await Self.queryiTunes(
-				urlString: "https://itunes.apple.com/lookup?bundleId=\(encodedID)&country=US"
-			) {
-				return foundUS
 			}
 			
 			// التطبيق محذوف من متجر أبل -> لا نجلب أي صور من أبل
@@ -766,6 +767,7 @@ final class AppStoreCacheManager: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var refreshAgain = false
     private var nextRefreshAllowed = Date.distantPast
+    private var lastSuccessfulRefresh = Date.distantPast
     private var indexGeneration: UInt64 = 0
     private var indexTask: Task<XSignCatalogSnapshot?, Never>?
 
@@ -917,6 +919,12 @@ final class AppStoreCacheManager: ObservableObject {
         await publicationTask?.value
     }
 
+    /// Called when a tab appears: fetches the newest catalog right away unless it was refreshed a few seconds ago.
+    func refreshIfStale<S: Collection>(sources: S, viewModel: SourcesViewModel, maxAge: TimeInterval = 20) async where S.Element == AltSource {
+        let stale = Date().timeIntervalSince(lastSuccessfulRefresh) >= maxAge
+        await refresh(sources: Array(sources), viewModel: viewModel, force: stale)
+    }
+
     func forceRefresh<S: Collection>(sources: S, viewModel: SourcesViewModel) async where S.Element == AltSource {
         await refresh(sources: Array(sources), viewModel: viewModel, force: true)
     }
@@ -962,7 +970,8 @@ final class AppStoreCacheManager: ObservableObject {
                 if self.catalogErrorMessage == nil, !viewModel.errors.isEmpty {
                     self.catalogErrorMessage = AshteL10n.t("تعذّر تحديث أحد المصادر. البيانات المحفوظة ما زالت متاحة؛ اسحب لأسفل للمحاولة مجددًا.")
                 }
-                self.nextRefreshAllowed = Date().addingTimeInterval(succeeded ? 300 : 15)
+                if succeeded { self.lastSuccessfulRefresh = Date() }
+                self.nextRefreshAllowed = Date().addingTimeInterval(succeeded ? 45 : 15)
             } while self.refreshAgain && !Task.isCancelled
         }
         refreshTask = task
@@ -1795,10 +1804,13 @@ struct AppStore2026DetailView: View {
 	}
 	
 	private var displayScreenshots: [URL] {
+		// Screenshots written in the AshteMobile JSON show instantly and always win;
+		// the Apple lookup is only a fallback for apps without their own screenshots.
+		if !item.screenshots.isEmpty { return item.screenshots }
 		if let screenshots = appleMetadata?.screenshots, !screenshots.isEmpty {
 			return screenshots
 		}
-		return item.screenshots
+		return []
 	}
 	
 	private var displayDescription: String {
@@ -2112,8 +2124,18 @@ struct AppStoreTodayView: View {
         }
         .environment(\.layoutDirection, AshteL10n.layoutDirection)
         .task(id: sources.map { $0.sourceURL?.absoluteString ?? "" }.sorted()) {
-            await cache.ensureFetched(sources: sources, viewModel: viewModel)
+            await warmScreenshots()
+            await cache.refreshIfStale(sources: sources, viewModel: viewModel)
+            await warmScreenshots()
         }
+        .onChange(of: cache.catalogRevision) { _ in
+            Task { await warmScreenshots() }
+        }
+    }
+
+    @MainActor
+    private func warmScreenshots() {
+        AppStoreScreenshotPrefetch.warm(cache.primaryItems)
     }
 }
 
@@ -2342,7 +2364,7 @@ struct SourcesView: View {
         .onChange(of: _selectedAppCategory) { _ in visibleAppCount = 60 }
 		.environment(\.layoutDirection, AshteL10n.layoutDirection)
         .task(id: _sources.map { $0.sourceURL?.absoluteString ?? "" }.sorted()) {
-            await cache.ensureFetched(sources: _sources, viewModel: viewModel)
+            await cache.refreshIfStale(sources: _sources, viewModel: viewModel)
         }
 	}
 }
@@ -2511,7 +2533,7 @@ struct AppStoreGamesView: View {
         .onChange(of: selectedGameCategory) { _ in visibleGameCount = 60 }
 		.environment(\.layoutDirection, AshteL10n.layoutDirection)
         .task(id: _sources.map { $0.sourceURL?.absoluteString ?? "" }.sorted()) {
-            await cache.ensureFetched(sources: _sources, viewModel: viewModel)
+            await cache.refreshIfStale(sources: _sources, viewModel: viewModel)
         }
 	}
 }
@@ -2627,7 +2649,7 @@ struct AppStoreSearchView: View {
 		.environment(\.layoutDirection, AshteL10n.layoutDirection)
         .task(id: _sources.map { $0.sourceURL?.absoluteString ?? "" }.sorted()) {
             triggerBackgroundSearch(query: searchText)
-            await cache.ensureFetched(sources: _sources, viewModel: viewModel)
+            await cache.refreshIfStale(sources: _sources, viewModel: viewModel)
         }
 	}
 	

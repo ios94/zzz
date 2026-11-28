@@ -123,6 +123,19 @@ actor XSignCatalogIO {
         return parts.url ?? input
     }
 
+    /// raw.githubusercontent.com keeps every URL in its CDN for ~5 minutes, so a new source JSON
+    /// looked "old" for minutes. A unique query value makes the CDN fetch the file again.
+    /// Only the network request changes; the cache file name still uses the clean URL.
+    nonisolated static func freshURL(_ input: URL) -> URL {
+        guard let host = input.host?.lowercased(),
+              host == "raw.githubusercontent.com" || host == "github.com" || host.hasSuffix(".githubusercontent.com"),
+              var parts = URLComponents(url: input, resolvingAgainstBaseURL: false) else { return input }
+        var items = (parts.queryItems ?? []).filter { $0.name != "_ts" }
+        items.append(URLQueryItem(name: "_ts", value: String(Int(Date().timeIntervalSince1970))))
+        parts.queryItems = items
+        return parts.url ?? input
+    }
+
     private func file(_ url: URL) -> URL {
         let key = SHA256.hash(data: Data(Self.canonicalURL(url).absoluteString.utf8))
             .map { String(format: "%02x", $0) }.joined()
@@ -232,7 +245,9 @@ actor XSignCatalogIO {
         let destination = file(url)
         let tagFile = destination.appendingPathExtension("etag")
         for attempt in 0..<2 {
-            var request = URLRequest(url: url)
+            var request = URLRequest(url: Self.freshURL(url))
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue("AshteMobile/2.0", forHTTPHeaderField: "User-Agent")
             if attempt == 0, FileManager.default.fileExists(atPath: destination.path),

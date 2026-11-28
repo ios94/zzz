@@ -100,3 +100,22 @@ struct AppStoreScreenshotPlaceholder: View {
 			}
 	}
 }
+
+// MARK: - Warm the image cache so screenshots are already on disk when an app page opens
+@MainActor
+enum AppStoreScreenshotPrefetch {
+	private static var prefetcher: ImagePrefetcher?
+	private static var lastKey = ""
+
+	static func warm(_ items: [AppStoreAppItem], apps: Int = 6, perApp: Int = 3) {
+		let urls = items.prefix(apps).flatMap { $0.screenshots.prefix(perApp) }
+		let key = urls.map(\.absoluteString).joined(separator: "|")
+		guard !urls.isEmpty, key != lastKey else { return }
+		lastKey = key
+		prefetcher?.stopPrefetching()
+		let next = ImagePrefetcher(pipeline: ImagePipeline.shared, destination: .diskCache, maxConcurrentRequestCount: 3)
+		next.priority = .low
+		next.startPrefetching(with: Array(urls))
+		prefetcher = next
+	}
+}
