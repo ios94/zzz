@@ -6,6 +6,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: extract-zip
+  cancel-in-progress: false
+
 jobs:
   extract:
     runs-on: ubuntu-latest
@@ -18,41 +22,59 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=== Zip files in the repo root ==="
-          ls -la ./*.zip 2>/dev/null || true
+          echo "=== Zip files in the repo ==="
+          find . -path ./.git -prune -o -type f -iname '*.zip' -print || true
 
-          # 1. Pick the zip that was committed LAST
-          ZIP=""
-          BEST=-1
-          for f in ./*.zip; do
-            [ -f "$f" ] || continue
-            t="$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)"
-            [ -n "$t" ] || t=0
-            echo "  $f  (committed at $t)"
-            if [ "$t" -ge "$BEST" ]; then BEST="$t"; ZIP="$f"; fi
-          done
+          # 1. Pick the zip that was committed LAST (repo root first, any folder as fallback)
+          pick_zip() {
+            local best=-1 zip="" f t
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              t="$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)"
+              [ -n "$t" ] || t="$(stat -c %Y "$f")"
+              echo "  $f  (time $t)" >&2
+              if [ "$t" -ge "$best" ]; then best="$t"; zip="$f"; fi
+            done
+            printf '%s' "$zip"
+          }
 
+          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' | sort | pick_zip)"
           if [ -z "$ZIP" ]; then
-            echo "::error::No .zip file found in the repository root. Upload the zip to the MAIN page of the repo (not inside a folder), then run this workflow again."
+            ZIP="$(find . -path ./.git -prune -o -type f -iname '*.zip' -print | sort | pick_zip)"
+          fi
+          if [ -z "$ZIP" ]; then
+            echo "::error::No .zip file found in the repository. Upload the zip to the MAIN page of the repo, then run this workflow again."
             exit 1
           fi
           echo "=== Using zip: $ZIP ==="
 
-          # 2. Unzip and remove macOS junk
+          # 2. Unzip (exit code 1 = harmless warnings) and remove macOS junk
           rm -rf /tmp/x && mkdir -p /tmp/x
-          unzip -q "$ZIP" -d /tmp/x
+          rc=0
+          unzip -q -o "$ZIP" -d /tmp/x || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::unzip failed (code $rc). The zip may be corrupt or the upload incomplete."
+            exit 1
+          fi
           rm -rf /tmp/x/__MACOSX
           find /tmp/x -name '.DS_Store' -delete
 
-          # 3. Content root: /changed, or a single top-level folder, or the zip root
+          # 3. Content root: a "changed" folder (anywhere up to 3 levels deep),
+          #    otherwise strip a single wrapper folder (e.g. zzz-main/),
+          #    but never strip a real repo folder such as AshteMobile/.
           SRC=/tmp/x
-          if [ -d "$SRC/changed" ]; then
-            SRC="$SRC/changed"
+          CHANGED="$(find /tmp/x -maxdepth 3 -type d -name changed | head -n 1 || true)"
+          if [ -n "$CHANGED" ]; then
+            SRC="$CHANGED"
           else
-            COUNT="$(find "$SRC" -mindepth 1 -maxdepth 1 | wc -l)"
-            if [ "$COUNT" -eq 1 ] && [ -d "$(find "$SRC" -mindepth 1 -maxdepth 1)" ]; then
-              SRC="$(find "$SRC" -mindepth 1 -maxdepth 1)"
-            fi
+            for _ in 1 2 3; do
+              COUNT="$(find "$SRC" -mindepth 1 -maxdepth 1 | wc -l)"
+              [ "$COUNT" -eq 1 ] || break
+              ONLY="$(find "$SRC" -mindepth 1 -maxdepth 1)"
+              [ -d "$ONLY" ] || break
+              if [ -e "./$(basename "$ONLY")" ]; then break; fi
+              SRC="$ONLY"
+            done
           fi
 
           FILES="$(find "$SRC" -type f | wc -l)"
@@ -66,13 +88,14 @@ jobs:
           (cd "$SRC" && find . -type f | sort)
 
           # 4. Copy into the repo (.github is skipped: the token cannot change workflows)
-          rsync -a --exclude='.git' --exclude='.github' "$SRC"/ ./
+          rsync -rlt --exclude='.git' --exclude='.github' "$SRC"/ ./
 
-          # 5. Remove every zip from the repo root
-          rm -f ./*.zip
+          # 5. Remove every zip from the repo
+          find . -path ./.git -prune -o -type f -iname '*.zip' -print -delete
 
       - name: Commit extracted files
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
@@ -86,4 +109,16 @@ jobs:
           fi
 
           git commit -m "Apply uploaded zip"
-          git push
+
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          for i in 1 2 3; do
+            if git push origin "HEAD:${BRANCH}"; then
+              echo "Pushed."
+              exit 0
+            fi
+            echo "Push failed (attempt $i), rebasing and retrying..."
+            git pull --rebase origin "${BRANCH}"
+            sleep 3
+          done
+          echo "::error::Could not push after 3 attempts."
+          exit 1
